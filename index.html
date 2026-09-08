@@ -191,6 +191,13 @@
   const load = () => { try { return JSON.parse(localStorage.getItem(KEY)); } catch { return null; } };
   const save = r  => { try { localStorage.setItem(KEY, JSON.stringify(r)); } catch {} };
 
+  // A-t-on deja vu ce PC vivant ? Tant que non, la page ne peut pas savoir
+  // s'il est allume, et "Allumer" pourrait en realite l'eteindre.
+  const SEEN = "nas.seen";
+  let everSeen = false;
+  try { everSeen = localStorage.getItem(SEEN) === "1"; } catch {}
+  function markSeen() { if (!everSeen) { everSeen = true; try { localStorage.setItem(SEEN, "1"); } catch {} } }
+
   /* ---------------- ecrans ---------------- */
   function show(which) {
     for (const s of ["setup","lock","app"]) $(s).hidden = (s !== which);
@@ -228,7 +235,8 @@
     const labels = { on:"En ligne", off:"Hors ligne", wait:"En cours…", unknown:"Injoignable" };
     $("stTxt").textContent = labels[state] || labels.unknown;
     $("stSub").textContent = sub || " ";
-    $("bOn").disabled  = (state === "on" || state === "wait");
+    // Allumer n'est actif que si l'on SAIT que le PC est eteint.
+    $("bOn").disabled  = (state !== "off");
     $("bOff").disabled = (state !== "on");
   }
 
@@ -245,6 +253,7 @@
         const up = mins < 60 ? `${mins} min` : `${Math.floor(mins/60)} h ${mins%60} min`;
         paint("on", `allumé depuis ${up}`);
         optimistic = 0;
+        markSeen();
         $("bCancel").hidden = !shuttingDown;
         return;
       }
@@ -271,6 +280,10 @@
 
   /* ---------------- actions ---------------- */
   $("bOn").onclick = async () => {
+    if (!everSeen && !confirm(
+        "Ce PC n'a encore jamais signalé sa présence.\n\n" +
+        "La page ne peut donc pas savoir s'il est allumé — et si c'est le cas, " +
+        "cette impulsion l'ÉTEINDRA.\n\nEnvoyer quand même ?")) return;
     try { await publish(cfg.power, "allume123"); optimistic = Date.now(); say("Impulsion envoyée", "ok"); tick(); }
     catch { say("Envoi impossible — pas de réseau ?", "err"); }
   };
