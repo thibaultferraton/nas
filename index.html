@@ -100,6 +100,8 @@
       <input id="cfgPower" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="topic de l'ESP32">
       <label>Topic ntfy de l'agent PC (extinction / état)</label>
       <input id="cfgAgent" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="topic de l'agent">
+      <label>Mot de passe des commandes</label>
+      <input id="cfgSecret" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="mot de passe partage avec l agent">
       <label>Code de déverrouillage (facultatif)</label>
       <input id="cfgPin" class="pin" type="tel" inputmode="numeric" maxlength="8" placeholder="····">
       <p class="hint">Les topics ne sont enregistrés que dans ce navigateur, jamais dans la page. Avec un code, ils y sont chiffrés : quelqu'un qui tombe sur l'adresse ne peut rien faire.</p>
@@ -205,6 +207,13 @@
   }
 
   /* ---------------- reseau ---------------- */
+  // Les commandes vers l agent portent un mot de passe partage. Sans lui,
+  // l agent ignore le message : connaitre le nom du topic ne suffit plus.
+  async function cmd(word) {
+    if (!cfg.secret) { say("Configuration incomplète : ressaisis le mot de passe.", "err"); show("setup"); return; }
+    return publish(cfg.agent, word + " " + cfg.secret);
+  }
+
   async function publish(topic, text) {
     const r = await fetch(`${NTFY}/${encodeURIComponent(topic)}`, {
       method:"POST", body:text, headers:{ "Content-Type":"text/plain" }
@@ -290,7 +299,7 @@
 
   $("bOff").onclick = async () => {
     try {
-      await publish(cfg.agent, "shutdown");
+      await cmd("shutdown");
       say("Extinction demandée — 30 s pour annuler", "ok");
       $("bCancel").hidden = false;
       setTimeout(() => { $("bCancel").hidden = true; }, 32000);
@@ -299,7 +308,7 @@
   };
 
   $("bCancel").onclick = async () => {
-    try { await publish(cfg.agent, "cancel"); say("Extinction annulée", "ok"); $("bCancel").hidden = true; tick(); }
+    try { await cmd("cancel"); say("Extinction annulée", "ok"); $("bCancel").hidden = true; tick(); }
     catch { say("Envoi impossible", "err"); }
   };
 
@@ -340,8 +349,9 @@
     const power = $("cfgPower").value.trim();
     const agent = $("cfgAgent").value.trim();
     const pin   = $("cfgPin").value.trim();
-    if (!power || !agent) { alert("Les deux topics sont nécessaires."); return; }
-    cfg = { power, agent };
+    const secret = $("cfgSecret").value.trim();
+    if (!power || !agent || !secret) { alert("Les deux topics et le mot de passe sont nécessaires."); return; }
+    cfg = { power, agent, secret };
     save(await seal(cfg, pin));
     show("app");
   };
