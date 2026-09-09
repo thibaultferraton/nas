@@ -28,10 +28,19 @@
 
   /* ---------- etat ---------- */
   .status{
+    position:relative;
     display:flex;align-items:center;gap:12px;justify-content:center;
     background:var(--panel);border:1px solid var(--line);border-radius:14px;
-    padding:16px;margin-bottom:22px;
+    padding:16px 44px;margin-bottom:22px;
   }
+  .refresh{
+    position:absolute;right:8px;top:50%;transform:translateY(-50%);
+    background:none;border:0;color:#4b535e;cursor:pointer;
+    padding:9px;line-height:0;border-radius:9px;
+  }
+  .refresh:hover{color:var(--dim)}
+  .refresh.spin svg{animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
   .dot{width:12px;height:12px;border-radius:50%;background:var(--off);flex:none;transition:background .3s}
   .dot.on{background:var(--on);box-shadow:0 0 0 0 rgba(63,185,80,.5);animation:pulse 2.4s infinite}
   .dot.wait{background:var(--wait);animation:blink 1s infinite}
@@ -129,6 +138,9 @@
     <div class="status">
       <div class="dot" id="dot"></div>
       <div><b id="stTxt">Vérification…</b><small id="stSub">&nbsp;</small></div>
+      <button class="refresh" id="bRefresh" title="Actualiser" aria-label="Actualiser">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+      </button>
     </div>
 
     <button class="btn go" id="bOn">
@@ -164,6 +176,20 @@
   let cfg = null;              // {power, agent} en memoire uniquement
   let poller = null;
   let optimistic = 0;          // horodatage d'un "allumer" recent
+
+  // L agent ne publie plus qu un battement toutes les 10 min : le quota
+  // gratuit de ntfy est de 250 messages par jour et par IP, et un battement
+  // toutes les 30 s en consommait 2880. Attendre passivement rendrait donc
+  // la page aveugle pendant des minutes. On demande l etat au lieu de
+  // l attendre : la page publie "ping", l agent repond par un battement.
+  const PING_COOLDOWN = 20000; // un ping toutes les 20 s au maximum
+  const PING_WINDOW   = 10000; // delai de reponse accorde a l agent
+  let lastPing  = 0;           // date du dernier ping reellement publie
+  let pendingAt = 0;           // 0 = aucune interrogation en cours
+  let baseReady = false;       // la reference d avant-ping est-elle relevee ?
+  let baseHbId  = null;        // dernier battement connu juste avant le ping
+  let deadHbId  = null;        // battement declare perime par un ping sans reponse
+  let pingFailed = false;      // le dernier ping n a pas pu etre publie
 
   /* ---------------- chiffrement ---------------- */
   const b64  = b => btoa(String.fromCharCode(...new Uint8Array(b)));
@@ -203,7 +229,7 @@
   /* ---------------- ecrans ---------------- */
   function show(which) {
     for (const s of ["setup","lock","app"]) $(s).hidden = (s !== which);
-    if (which === "app") startPolling(); else stopPolling();
+    if (which === "app") { startPolling(); requestState(false); } else stopPolling();
   }
 
   /* ---------------- reseau ---------------- */
@@ -222,7 +248,9 @@
   }
 
   async function fetchState() {
-    const r = await fetch(`${NTFY}/${encodeURIComponent(cfg.agent)}/json?poll=1&since=120s`, { cache:"no-store" });
+    // 900 s : il faut pouvoir relire un battement de 10 min, sinon le filet
+    // de securite ci-dessous ne verrait jamais rien.
+    const r = await fetch(`${NTFY}/${encodeURIComponent(cfg.agent)}/json?poll=1&since=900s`, { cache:"no-store" });
     if (!r.ok) throw new Error("ntfy " + r.status);
     const txt = await r.text();
     let hb = null, ev = null;
@@ -235,6 +263,50 @@
       if (body.startsWith("etat")) ev = m;
     }
     return { hb, ev };
+  }
+
+  /* ---------------- interrogation a la demande ---------------- */
+  // Publie "ping" et laisse PING_WINDOW a l agent pour repondre. Jamais plus
+  // d un ping toutes les PING_COOLDOWN : chaque ping coute un message de
+  // quota au telephone, et un autre au PC pour la reponse.
+  function setBusy(b) { $("bRefresh").classList.toggle("spin", !!b); }
+
+  async function requestState(manual) {
+    if (!cfg || !cfg.secret) return;
+    const now = Date.now();
+    if (now - lastPing < PING_COOLDOWN) {
+      if (manual) say(`Encore ${Math.ceil((PING_COOLDOWN - (now - lastPing)) / 1000)} s avant de pouvoir réinterroger`);
+      tick();
+      return;
+    }
+    lastPing  = now;
+    pendingAt = now;
+    baseReady = false;
+    setBusy(true);
+    paint("wait", "interrogation du PC…");
+    try {
+      // Releve d abord le dernier battement deja publie : c est lui qui sert
+      // de reference pour reconnaitre la reponse. Sans ce releve, un vieux
+      // battement encore visible passerait pour une reponse au ping.
+      const before = await fetchState();
+      baseHbId  = before.hb ? before.hb.id : null;
+      baseReady = true;
+      pendingAt = Date.now();   // la fenetre de reponse part du ping lui-meme
+      await cmd("ping");
+      pingFailed = false;
+    } catch {
+      // Publication refusee, quota du telephone atteint ou reseau coupe : la
+      // page n a pas pu poser la question, elle ne sait donc rien.
+      pendingAt  = 0;
+      baseReady  = false;
+      pingFailed = true;
+      setBusy(false);
+      paint("unknown", "envoi impossible");
+      return;
+    }
+    // Relectures rapprochees pendant la fenetre de reponse : ce sont des
+    // lectures, elles ne consomment pas le quota de publication.
+    for (const d of [1500, 3500, 6000, 9000, PING_WINDOW + 800]) setTimeout(tick, d);
   }
 
   /* ---------------- affichage de l'etat ---------------- */
@@ -253,9 +325,32 @@
     try {
       const { hb, ev } = await fetchState();
       const now  = Date.now() / 1000;
-      const alive = hb && (now - hb.time) < 75;
+
+      // Reponse a notre ping : un battement different de celui qui etait la
+      // avant. On compare des identifiants et jamais deux horloges, celle du
+      // telephone et celle de ntfy n etant pas les memes.
+      const replied  = pendingAt !== 0 && baseReady && hb && hb.id !== baseHbId;
+      const waiting  = pendingAt !== 0 && !replied &&
+                       (!baseReady || (Date.now() - pendingAt) < PING_WINDOW);
+      const timedOut = pendingAt !== 0 && !replied && !waiting;
+
+      if (replied)  { pendingAt = 0; baseReady = false; deadHbId = null; pingFailed = false; }
+      // Ping reste sans reponse : le PC est eteint, et le battement encore
+      // visible est un vestige. On le marque pour que le filet ci-dessous ne
+      // le reprenne pas pour un signe de vie au prochain tour.
+      if (timedOut) { pendingAt = 0; baseReady = false; deadHbId = hb ? hb.id : null; }
+      setBusy(pendingAt !== 0);
+
+      // Filet de securite : l agent publie de lui-meme toutes les 10 min.
+      const fresh = hb && hb.id !== deadHbId && (now - hb.time) < 750;
+      const alive = replied || (!timedOut && fresh);
       const shuttingDown = ev && (now - ev.time) < 90 && /extinction en cours|redemarrage/.test(ev.message);
 
+      if (waiting) { paint("wait", "interrogation du PC…"); return; }
+      // Tant que la question n a pas pu partir, aucun verdict : se fier au
+      // filet de 750 s ferait dire "en ligne" a partir d un battement qui
+      // peut dater de dix minutes, et "hors ligne" sur un simple silence.
+      if (pingFailed) { paint("unknown", "état inconnu — envoi impossible"); return; }
       if (shuttingDown && !alive) { paint("wait", "extinction en cours…"); return; }
       if (alive) {
         const mins = (hb.message.split(/\s+/)[2] | 0);
@@ -268,7 +363,7 @@
       }
       $("bCancel").hidden = true;
       if (Date.now() - optimistic < 150000) paint("wait", "démarrage en cours…");
-      else paint("off", "aucun signe de vie");
+      else paint("off", deadHbId ? "sans réponse au ping" : "aucun signe de vie");
     } catch (e) {
       paint("unknown", "ntfy injoignable");
     }
@@ -306,6 +401,8 @@
       paint("wait", "extinction en cours…");
     } catch { say("Envoi impossible — pas de reseau ?", "err"); }
   };
+
+  $("bRefresh").onclick = () => requestState(true);
 
   $("bCancel").onclick = async () => {
     try { await cmd("cancel"); say("Extinction annulée", "ok"); $("bCancel").hidden = true; tick(); }
@@ -379,7 +476,7 @@
   else               { cfg = JSON.parse(rec.data); show("app"); }
 
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && !$("app").hidden) startPolling();
+    if (document.visibilityState === "visible" && !$("app").hidden) { startPolling(); requestState(false); }
     else if (document.visibilityState === "hidden") stopPolling();
   });
 })();
